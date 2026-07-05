@@ -20,9 +20,8 @@ use std::path::Path;
 
 use crate::accel::{get_ort_accelerator, OrtAccelerator};
 
-/// Build the execution provider list based on the global accelerator preference.
-fn execution_providers() -> Vec<ort::ep::ExecutionProviderDispatch> {
-    let pref = get_ort_accelerator();
+/// Build the execution provider list for the given accelerator preference.
+fn execution_providers(pref: OrtAccelerator) -> Vec<ort::ep::ExecutionProviderDispatch> {
     let mut eps = Vec::new();
 
     match pref {
@@ -130,8 +129,7 @@ fn execution_providers() -> Vec<ort::ep::ExecutionProviderDispatch> {
 
 /// Returns true if the selected execution provider requires sequential execution
 /// and disabled memory patterns (DirectML, WebGPU).
-fn requires_sequential_session() -> bool {
-    let pref = get_ort_accelerator();
+fn requires_sequential_session(pref: OrtAccelerator) -> bool {
     (pref == OrtAccelerator::DirectMl && cfg!(feature = "ort-directml"))
         || (pref == OrtAccelerator::WebGpu && cfg!(feature = "ort-webgpu"))
 }
@@ -139,8 +137,7 @@ fn requires_sequential_session() -> bool {
 /// Returns true if the XNNPACK EP is selected and compiled in. XNNPACK runs
 /// its own threadpool, so the session intra-op pool should be reduced to a
 /// single non-spinning thread to avoid contention.
-fn is_xnnpack_active() -> bool {
-    let pref = get_ort_accelerator();
+fn is_xnnpack_active(pref: OrtAccelerator) -> bool {
     pref == OrtAccelerator::Xnnpack && cfg!(feature = "ort-xnnpack")
 }
 
@@ -149,11 +146,12 @@ fn build_session(
     path: &Path,
     intra_threads: Option<usize>,
     parallel_execution: bool,
+    pref: OrtAccelerator,
 ) -> Result<Session, ort::Error> {
     let mut builder =
         Session::builder()?.with_optimization_level(GraphOptimizationLevel::Level3)?;
 
-    if is_xnnpack_active() {
+    if is_xnnpack_active(pref) {
         // See ort::ep::XNNPACK docs: disable session intra-op spinning and
         // force a single intra-op thread when XNNPACK is the active EP.
         builder = builder.with_intra_op_spinning(false)?;
@@ -165,7 +163,7 @@ fn build_session(
     }
 
     // DirectML and WebGPU require parallel_execution(false) and memory_pattern(false)
-    let use_parallel = if requires_sequential_session() {
+    let use_parallel = if requires_sequential_session(pref) {
         false
     } else {
         parallel_execution
@@ -173,12 +171,12 @@ fn build_session(
 
     builder = builder.with_parallel_execution(use_parallel)?;
 
-    if requires_sequential_session() {
+    if requires_sequential_session(pref) {
         builder = builder.with_memory_pattern(false)?;
     }
 
     let session = builder
-        .with_execution_providers(execution_providers())?
+        .with_execution_providers(execution_providers(pref))?
         .commit_from_file(path)?;
 
     for input in session.inputs() {
@@ -201,12 +199,26 @@ fn build_session(
 
 /// Create an ONNX session with standard settings.
 pub fn create_session(path: &Path) -> Result<Session, ort::Error> {
-    build_session(path, None, true)
+    build_session(path, None, true, get_ort_accelerator())
 }
 
 /// Create an ONNX session with configurable thread count.
 pub fn create_session_with_threads(path: &Path, num_threads: usize) -> Result<Session, ort::Error> {
-    build_session(path, Some(num_threads), true)
+    build_session(path, Some(num_threads), true, get_ort_accelerator())
+}
+
+/// Create an ONNX session with an explicit accelerator preference,
+/// overriding the global [`set_ort_accelerator`](crate::accel::set_ort_accelerator)
+/// setting for this session only.
+///
+/// Useful when one model component benefits from a different execution
+/// provider than the rest, e.g. a small autoregressive decoder whose
+/// per-call GPU dispatch overhead outweighs its compute.
+pub fn create_session_with_accelerator(
+    path: &Path,
+    pref: OrtAccelerator,
+) -> Result<Session, ort::Error> {
+    build_session(path, None, true, pref)
 }
 
 /// Resolve a model file path for the requested quantization level.

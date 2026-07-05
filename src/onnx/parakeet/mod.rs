@@ -99,7 +99,18 @@ impl ParakeetModel {
         let preprocessor_path = model_dir.join("nemo128.onnx");
 
         let encoder = session::create_session(&encoder_path)?;
-        let decoder_joint = session::create_session(&decoder_path)?;
+        // The decoder_joint is a tiny autoregressive graph invoked once per
+        // decode step — thousands of strictly serial calls per audio chunk —
+        // so per-call dispatch latency dominates its compute. On GPU
+        // execution providers each call pays a dispatch + readback
+        // round-trip (~2.8ms on WebGPU vs ~0.26ms on CPU, ~11x), and since
+        // every inter-session tensor already round-trips through host
+        // memory, running it on CPU adds no transfers. Pin it to CPU; with
+        // a CPU-like global preference this is a no-op.
+        let decoder_joint = session::create_session_with_accelerator(
+            &decoder_path,
+            crate::accel::OrtAccelerator::CpuOnly,
+        )?;
         let preprocessor = session::create_session(&preprocessor_path)?;
 
         let vocab_path = model_dir.join("vocab.txt");
